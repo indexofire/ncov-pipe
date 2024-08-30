@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+
+REF=$HOME/data/19ncov/SARS-CoV-2.reference.fasta
+OUTPUT=Fasta_output
+CPU=`nproc --all`
+
+
+read -p "Please enter the desired depth for masking your data o(-ω-)o (must be an integer,default is 20):" depths
+if [ -z "${depths}" ];then
+depths=20
+fi
+
+if [ ! -f barcodes.csv ];then
+    echo "No barcodes.csv file found"
+else
+    while IFS=, read -r barcode location sample lab date
+    do
+    if [ $barcode = "barcode" ]
+    then
+        continue
+    else
+    ls fastq_pass/${barcode}/*.gz | parallel -k -j8 zcat {} > ${barcode}.fastq
+    cat ${barcode}.fastq | NanoFilt -q 10  --headcrop 25 --tailcrop 25  > ${barcode}.clean.fastq
+    minimap2 -ax map-ont -t ${CPU} -R '@RG\tID:'$sample'\tSM:'$sample $REF ${barcode}.clean.fastq | samtools view -bS -F 4 - | samtools sort -o ${barcode}.sorted.bam
+    samtools index ${barcode}.sorted.bam
+    medaka consensus --model r941_min_sup_g507 ${barcode}.sorted.bam ${barcode}.hdf
+    medaka variant $REF ${barcode}.hdf ${barcode}.vcf
+    bgzip -f ${barcode}.vcf
+    tabix -f -p vcf ${barcode}.vcf.gz
+    longshot -P 0 -F -A --no_haps -b ${barcode}.sorted.bam -f $REF -o ${barcode}.longshot.vcf -v ${barcode}.vcf.gz
+    artic_vcf_filter --medaka ${barcode}.longshot.vcf ${barcode}.pass.vcf ${barcode}.fail.vcf
+    bgzip -f ${barcode}.pass.vcf
+    tabix -p vcf ${barcode}.pass.vcf.gz
+    artic_make_depth_mask --depth $depths --store-rg-depths $REF ${barcode}.sorted.bam ${barcode}.coverage_mask.txt
+    artic_mask $REF ${barcode}.coverage_mask.txt ${barcode}.fail.vcf ${barcode}.preconsensus.fasta
+    bcftools consensus -f ${barcode}.preconsensus.fasta ${barcode}.pass.vcf.gz -m ${barcode}.coverage_mask.txt -o ${barcode}.consensus.fasta
+    echo '>hCoV-19/'${location}'/'${lab}'-'${sample}'/'${date} > ../${sample}.fasta
+    sed -n '2,$p' ${barcode}.consensus.fasta >> ../${sample}.fasta
+    fi
+    done < barcodes.csv
+fi
